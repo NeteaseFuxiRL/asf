@@ -1,5 +1,8 @@
-# A2C
+# A2C with  Action-Specific Focuses
 
-- Original paper: https://arxiv.org/abs/1602.01783
-- Baselines blog post: https://blog.openai.com/baselines-acktr-a2c/
-- `python -m baselines.a2c.run_atari` runs the algorithm for 40M frames = 10M timesteps on an Atari game. See help (`-h`) for more options.
+- Implementation of A2C with action-specific focuses inAtari environments.
+- For Atari environments: 
+    - `python3 baselines/a2c/run_atari.py` runs the algorithm for 80M frames on an Atari environment, and the "param" parameter represents the attention type.
+        - `python3 baselines/a2c/run_atari.py --policy=CnnAttention --param=action`: action-specific focuses method
+        - `python3 baselines/a2c/run_atari.py  --policy=CnnAttention --param=state`: state attention method
+        - `python3 baselines/a2c/run_atari.py  --policy=cnn`: pure PPO without attention

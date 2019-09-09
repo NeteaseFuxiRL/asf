@@ -2,44 +2,45 @@ import os
 import os.path as osp
 import gym
 import time
+from collections import deque
+
 import joblib
 import logging
 import numpy as np
 import tensorflow as tf
+
 from baselines import logger
-
-from baselines.common import set_global_seeds, explained_variance
-from baselines.common.vec_env.subproc_vec_env import SubprocVecEnv
-from baselines.common.atari_wrappers import wrap_deepmind
-from baselines.common import tf_util
-
-from baselines.a2c.utils import discount_with_dones
+from baselines.a2c.policies import get_nact
 from baselines.a2c.utils import Scheduler, make_path, find_trainable_variables
 from baselines.a2c.utils import cat_entropy, mse
+from baselines.a2c.utils import discount_with_dones
+from baselines.common import set_global_seeds, explained_variance
+from baselines.common import tf_util
+
 
 class Model(object):
 
     def __init__(self, policy, ob_space, ac_space, nenvs, nsteps,
-            ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4,
-            alpha=0.99, epsilon=1e-5, total_timesteps=int(80e6), lrschedule='linear'):
+                 ent_coef=0.01, vf_coef=0.5, max_grad_norm=0.5, lr=7e-4,
+                 alpha=0.99, epsilon=1e-5, total_timesteps=int(80e6), lrschedule='linear', param=None):
 
         sess = tf_util.make_session()
         nact = ac_space.n
-        nbatch = nenvs*nsteps
+        nbatch = nenvs * nsteps
 
         A = tf.placeholder(tf.int32, [nbatch])
         ADV = tf.placeholder(tf.float32, [nbatch])
         R = tf.placeholder(tf.float32, [nbatch])
         LR = tf.placeholder(tf.float32, [])
 
-        step_model = policy(sess, ob_space, ac_space, nenvs, 1, reuse=False)
-        train_model = policy(sess, ob_space, ac_space, nenvs*nsteps, nsteps, reuse=True)
+        step_model = policy(sess, ob_space, ac_space, nenvs, 1, reuse=False, param=param)
+        train_model = policy(sess, ob_space, ac_space, nenvs * nsteps, nsteps, reuse=True, param=param)
 
         neglogpac = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=train_model.pi, labels=A)
         pg_loss = tf.reduce_mean(ADV * neglogpac)
         vf_loss = tf.reduce_mean(mse(tf.squeeze(train_model.vf), R))
         entropy = tf.reduce_mean(cat_entropy(train_model.pi))
-        loss = pg_loss - entropy*ent_coef + vf_loss * vf_coef
+        loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef
 
         params = find_trainable_variables("model")
         grads = tf.gradients(loss, params)
@@ -55,7 +56,7 @@ class Model(object):
             advs = rewards - values
             for step in range(len(obs)):
                 cur_lr = lr.value()
-            td_map = {train_model.X:obs, A:actions, ADV:advs, R:rewards, LR:cur_lr}
+            td_map = {train_model.X: obs, A: actions, ADV: advs, R: rewards, LR: cur_lr}
             if states is not None:
                 td_map[train_model.S] = states
                 td_map[train_model.M] = masks
@@ -145,15 +146,17 @@ class Runner(object):
         mb_masks = mb_masks.flatten()
         return mb_obs, mb_states, mb_rewards, mb_masks, mb_actions, mb_values
 
-def learn(policy, env, seed, nsteps=5, total_timesteps=int(80e6), vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5, lr=7e-4, lrschedule='linear', epsilon=1e-5, alpha=0.99, gamma=0.99, log_interval=100):
-    tf.reset_default_graph()
-    set_global_seeds(seed)
+
+def learn(policy, env, seed, nsteps=5, total_timesteps=int(80e6), vf_coef=0.5, ent_coef=0.01, max_grad_norm=0.5, lr=7e-4, lrschedule='linear', epsilon=1e-5, alpha=0.99, gamma=0.99, log_interval=100,
+          param=None):
+    # tf.reset_default_graph()
+    # set_global_seeds(seed)
 
     nenvs = env.num_envs
     ob_space = env.observation_space
     ac_space = env.action_space
     model = Model(policy=policy, ob_space=ob_space, ac_space=ac_space, nenvs=nenvs, nsteps=nsteps, ent_coef=ent_coef, vf_coef=vf_coef,
-        max_grad_norm=max_grad_norm, lr=lr, alpha=alpha, epsilon=epsilon, total_timesteps=total_timesteps, lrschedule=lrschedule)
+                  max_grad_norm=max_grad_norm, lr=lr, alpha=alpha, epsilon=epsilon, total_timesteps=total_timesteps, lrschedule=lrschedule, param=param)
     runner = Runner(env, model, nsteps=nsteps, gamma=gamma)
 
     nbatch = nenvs*nsteps

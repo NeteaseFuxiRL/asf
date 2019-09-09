@@ -177,9 +177,10 @@ class TensorBoardOutputFormat(KVWriter):
 
 
 def make_output_format(format, ev_dir):
-    from mpi4py import MPI
+    # from mpi4py import MPI
     os.makedirs(ev_dir, exist_ok=True)
-    rank = MPI.COMM_WORLD.Get_rank()
+    # rank = MPI.COMM_WORLD.Get_rank()
+    rank=0
     if format == 'stdout':
         return HumanOutputFormat(sys.stdout)
     elif format == 'log':

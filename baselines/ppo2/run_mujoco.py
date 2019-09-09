@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 import os, sys
 
-sys.path.append('/home/netease/code/baseline')
-if '/home/netease/code/openai_baselines/baselines' in sys.path:
-    sys.path.remove('/home/netease/code/openai_baselines/baselines')
+sys.path.append('/home/code/baseline')
+if '/home/code/openai_baselines/baselines' in sys.path:
+    sys.path.remove('/home/code/openai_baselines/baselines')
 import time
 from baselines.ppo2.policies import MlpPolicy, MlpAttentionPolicy, MlpStateAttentionPolicy
 from baselines import bench, logger
@@ -40,8 +40,8 @@ def train(env_id, num_timesteps, seed, method):
             save_path = model_name + "_" + method + "_lr" + str(lr) + "_" + init_time
         else:
             save_path = model_name + "_" + method + "_lr" + str(lr) + "_" + init_time
-        tb_dir = os.path.join("/home/netease/data/save/baseline/logs/%s" % save_path)
-        logger_dir = os.path.join("/home/netease/data/save/baseline/logger/%s" % save_path)
+        tb_dir = os.path.join("/home/data/save/baseline/logs/%s" % save_path)
+        logger_dir = os.path.join("/home/data/save/baseline/logger/%s" % save_path)
         for dir in [tb_dir, logger_dir]:
             if not os.path.exists(dir):
                 os.makedirs(dir)
