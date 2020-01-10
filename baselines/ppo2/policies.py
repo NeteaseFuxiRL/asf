@@ -174,16 +174,17 @@ class CnnAttentionPolicy(object):
         actions_onehot = tf.eye(nact, batch_shape=[nbatch])  # [None, num_actions, num_actions]
         batch_actions_onehot = tf.reshape(actions_onehot, shape=(-1, nact))  # [None * num_actions, num_actions]
         with tf.variable_scope("model", reuse=reuse):
-            hidden_output_v, hidden_output_p = self.attention_cnn(X, nact, nbatch, state_attention)  # [None, fc_out] [None * num_actions, 512]
-            vf = tf.squeeze(tf.identity(fc(hidden_output_v, 'logits_v', 1, init_scale=np.sqrt(2))), axis=[1])
-            logits_p_layer_raw = tf.nn.leaky_relu(fc(hidden_output_p, "logits_p_layer_raw", nact, init_scale=np.sqrt(2)))  # [None * num_actions, nact]
-            if state_attention not in ["action"]:
-                assert logits_p_layer_raw.get_shape().as_list()[1] == nact
+            hidden_output_v, hidden_output_p = self.attention_cnn(X, nact, nbatch)  # [nbatch, fc_out] [nbatch * num_actions, 512]
+            # vf = tf.squeeze(tf.identity(fc(hidden_output_v, 'logits_v', 1, init_scale=np.sqrt(2))), axis=[1])
+            vf = fc(hidden_output_v, 'v', 1)[:, 0]
+            logits_p_layer_raw = fc(hidden_output_p, "logits_p_layer_raw", nact, init_scale=0.01)  # [nbatch * num_actions, num_actions]
+            if self.state_attention not in ["action"]:
+                assert logits_p_layer_raw.get_shape().as_list() == [nbatch, nact]
                 pi = logits_p_layer_raw
             else:
-                logits_p_attention = tf.multiply(logits_p_layer_raw, batch_actions_onehot, name="logits_p_attention")
-                logits_p_attention_vector = tf.reduce_sum(logits_p_attention, axis=1, name="logits_p_attention_reduce")
-                pi = tf.reshape(logits_p_attention_vector, shape=(nbatch, nact), name="logits_p")
+                logits_p_attention = tf.multiply(logits_p_layer_raw, batch_actions_onehot, name="logits_p_attention")  # [nbatch * num_actions, num_actions]
+                logits_p_attention_vector = tf.reduce_sum(logits_p_attention, axis=1, name="logits_p_attention_reduce")  # [nbatch * num_actions]
+                pi = tf.reshape(logits_p_attention_vector, shape=(nbatch, nact), name="logits_p")  # [nbatch , num_actions,]
 
         self.pdtype = make_pdtype(ac_space)
         self.pd = self.pdtype.pdfromflat(pi)
@@ -199,10 +200,8 @@ class CnnAttentionPolicy(object):
         def value(ob, *_args, **_kwargs):
             return sess.run(vf, {X: ob})
 
-        attention_sigmoid = self.attention
-
         def get_attention(ob, *_args, **_kwargs):
-            attention = sess.run(attention_sigmoid, {X: ob})
+            attention = sess.run(self.output_attention, {X: ob})
             return attention
 
         self.X = X
@@ -212,110 +211,62 @@ class CnnAttentionPolicy(object):
         self.value = value
         self.get_attention = get_attention
 
-    def attention_cnn(self, unscaled_images, nact, nbatch, state_attention):
-        """
-        CNN from Nature paper.
-        """
-        scaled_images = tf.cast(unscaled_images, tf.float32) / 255.
+    def attention_cnn(self, unscaled_images, nact, nbatch):
+        scaled_images = tf.cast(unscaled_images, tf.float32) / 255.  # [None, 84, 84, 1]
         activ = tf.nn.relu
         h = activ(conv(scaled_images, 'c1', nf=32, rf=8, stride=4, init_scale=np.sqrt(2)))
         h2 = activ(conv(h, 'c2', nf=64, rf=4, stride=2, init_scale=np.sqrt(2)))
-        h3 = activ(conv(h2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2)))  # [None, h, w, c_out]
+        h3 = activ(conv(h2, 'c3', nf=64, rf=3, stride=1, init_scale=np.sqrt(2)))  # [nbatch, h, w, c]
+        h = h3.get_shape().as_list()[1]
+        w = h3.get_shape().as_list()[2]
+        c = h3.get_shape().as_list()[3]
+        h3_flatten = conv_to_fc(h3)
+        fc_out_unit = 512
+        if self.state_attention == "state":
+            batch_state_input_attention = h3_flatten  # [nbatch, h*w*c]
+            batch_actions_onehot = batch_state_input_attention  # [nbatch, h*w*c]
+            attention_input = batch_state_input_attention
+        else:
+            # expand the state
+            batch_state_input_attention = tf.reshape(tf.tile(h3_flatten, [1, nact]), shape=(-1, h * w * c))  # [nbatch*nact,*h*w*c]
+            # expand the action
+            actions_onehot = tf.eye(nact, batch_shape=[nbatch])
+            batch_actions_onehot = tf.reshape(actions_onehot, shape=(-1, nact))  # [nbatch*nact, nact]
+            # combine the action and the state
+            attention_input = tf.concat([batch_state_input_attention, dot(batch_actions_onehot, 'attention_query_dot', h * w * c, init_scale=np.sqrt(2))], axis=1)  # [nbatch*nact, 2*h*w*c]
+        # compute the attention logits
+        attention_logits = fc(attention_input, "attention_logits", h * w, init_scale=np.sqrt(2))  # [nbatch*nact, h*w] or [nbatch, h*w]
+        # get the final attention
+        self.attention = tf.sigmoid(attention_logits)  # [nbatch*nact, h*w] or [nbatch, h*w]
+        # multiply the attention weights with the original state
+        if self.state_attention == "state":
+            attention_reshape = tf.tile(tf.reshape(self.attention, shape=(nbatch * h * w, 1)), [1, c])  # [nbatch*h*w,c]
+            raw_attended_result = tf.reshape(tf.multiply(tf.reshape(h3, shape=(nbatch * h * w, c)), attention_reshape), shape=(nbatch, h * w * c))  # [nbatch, h*w*c]
+            self.attention_loss = tf.constant(value=0, dtype="float32")
+        else:
+            h3_flatten_tile = tf.reshape(tf.tile(h3_flatten, [1, nact]), shape=(-1, c))  # [nbatch*nact*h*w, c]
+            attention_reshape = tf.tile(tf.reshape(self.attention, shape=(nbatch * nact * h * w, 1)), [1, c])  # [nbatch*nact*h*w*, c]
+            raw_attended_result = tf.reshape(tf.multiply(h3_flatten_tile, attention_reshape), shape=(nbatch * nact, h * w * c))  # [nbatch*nact, h*w*c]
+            # reshape the attention matrix for attention image print
+            self.output_attention = tf.reshape(tf.expand_dims(self.attention, dim=-1), shape=(nbatch * nact, h, w, 1))
+            # compute the attention differences for loss
+            attention4loss = tf.reshape(self.attention, shape=(nbatch, nact, h * w))  # [nbatch, nact, h*w]
+            attention_loss = 0
+            for i in range(1, nact):
+                attention_loss = attention_loss + tf.reduce_sum(tf.square(attention4loss - tf.concat([attention4loss[:, :i, :], attention4loss[:, :-i, :]], axis=1)), axis=[1, 2])
+            print("attention loss shape is {}, batch size is {}".format(attention_loss.get_shape().as_list(), nbatch))
+            self.attention_loss = tf.exp(-tf.reduce_mean(attention_loss, axis=0))
+        # combine the attended states with the original states
+        attention_result_in_batch = tf.concat([batch_state_input_attention, raw_attended_result], axis=-1)
+        # use an fc for hidden output p
+        hidden_output_p = activ(fc(attention_result_in_batch, "p", fc_out_unit, init_scale=np.sqrt(2)))  # [nbatch*nact, fc_out_unit], n_params = c*fc_out_unit+fc_out_unit
+        # assert hidden_output_p.get_shape().as_list()[0] == nbatch * nact, "Tensor shape is {}, right shape is {}".format(hidden_output_p.get_shape().as_list(), [nbatch * nact, fc_out_unit])
+
+        # compute the hidden value for v as usual
         h3_flatten = conv_to_fc(h3)  # [None, h * w * c_out]
-        hidden_output_v = activ(fc(h3_flatten, 'fc1', 512, init_scale=np.sqrt(2)))  # [None, fc_out]
-        conv_result_4d_p = self.create_Channel_Spatial_CBAM(h3, nact, nbatch, state_attention, activ)  # [None * num_actions, h, w, (2 * c) or c]
-        flatten_p = conv_to_fc(conv_result_4d_p)  # [None * num_actions, h * w * ((2 * c) or c)]
-        hidden_output_p = activ(fc(flatten_p, "p", 512, init_scale=np.sqrt(2)))  # [None * num_actions, 512]
+        hidden_output_v = activ(fc(h3_flatten, 'fc1', fc_out_unit, init_scale=np.sqrt(2)))  # [None, fc_out], n_params = h * w * c* 512+512
         return hidden_output_v, hidden_output_p
 
-    def create_fc_attention(self, nact, nbatch, state_attention, activ, input_data=None, reduction_ratio=2):
-        _input = input_data
-        if len(_input.get_shape()) > 2:
-            print("Can only process 2d input.")
-            return
-        _input_dim = _input.get_shape().as_list()[1]
-        actions_onehot = tf.eye(nact, batch_shape=[nbatch])
-        batch_actions_onehot = tf.reshape(actions_onehot, shape=(-1, nact))
-        fc_activ = tf.nn.relu
-        if state_attention not in ["action", "action-channel"]:
-            action_state_x = _input
-        else:
-            batch_state_input_attention = tf.reshape(tf.tile(_input, [1, nact]), shape=(-1, _input_dim))
-            action_state_x = tf.concat([batch_state_input_attention, batch_actions_onehot], axis=1)
-        with tf.variable_scope('fc_attention_reuse', reuse=tf.AUTO_REUSE) as scope:
-            state_attention_result = fc_activ(fc(action_state_x, 'fc_attention_hidden', int(_input_dim / reduction_ratio), init_scale=np.sqrt(2)))
-            state_attention_result = fc(state_attention_result, 'fc_attention_logit', int(_input_dim), init_scale=np.sqrt(2))
-        return state_attention_result
-
-    def get_4d_unit_tensor(self, h, w, nact, nbatch):
-        a = np.zeros(shape=(nact, h, w, nact), dtype=np.float32)
-        for i in range(nact):
-            a[i, :, :, i] = 1.0
-        batch_4d_unit = tf.tile(tf.constant(a, dtype=tf.float32), multiples=[nbatch, 1, 1, 1])
-        return batch_4d_unit
-
-    def create_Channel_Spatial_CBAM(self, input, nact, nbatch, state_attention, activ):
-        '''
-        if use action attention mode, different actions will have different attentions from the channel steps
-        :param input:
-        :param nact:
-        :param nbatch:
-        :param concat:
-        :param state_attention:
-        :param activ:
-        :return:
-        '''
-        if len(input.get_shape()) <= 2:
-            print("Can only process 4d input with NHWC.")
-            return
-        n = input.get_shape().as_list()[0]
-        h = input.get_shape().as_list()[1]
-        w = input.get_shape().as_list()[2]
-        c = input.get_shape().as_list()[3]
-        reduction_ratio = 2
-        max_pool_channel = tf.nn.max_pool(input, ksize=[1, h, w, 1], strides=[1, 1, 1, 1], padding="VALID")  # [None, 1, 1, c]
-        max_pool_channel = max_pool_channel[:, 0, 0, :]  # [None, c]
-        avg_pool_channel = tf.nn.avg_pool(input, ksize=[1, h, w, 1], strides=[1, 1, 1, 1], padding="VALID")  # [None, 1, 1, c]
-        avg_pool_channel = avg_pool_channel[:, 0, 0, :]  # [None, c]
-        attention_channel_logits = []
-        for pool in [avg_pool_channel, max_pool_channel]:
-            attention_channel_logits.append(self.create_fc_attention(nact, nbatch, state_attention, activ, input_data=pool, reduction_ratio=reduction_ratio))
-        attention_channel = tf.sigmoid(tf.add(attention_channel_logits[0], attention_channel_logits[1]))  # [nbatch*nact, c]
-        attention_channel_expand_dim = tf.expand_dims(attention_channel, 1)  # [nbatch*nact, 1, c]
-        attention_channel_expand_dim = tf.expand_dims(attention_channel_expand_dim, 1)  # [nbatch*nact, 1, 1, c]
-        assert attention_channel_expand_dim.get_shape().as_list()[1:] == [1, 1, c]
-        attention_channel_tile = tf.tile(attention_channel_expand_dim, multiples=[1, h, w, 1])  # [nbatch*nact, h, w, c]
-        if state_attention not in ["action"]:
-            _input_tile_nhwc = input
-        else:
-            # tile and adjust the shape of _input
-            _input_tile = tf.tile(input, multiples=[1, 1, 1, nact])
-            _input_tile_nchw = tf.transpose(_input_tile, [0, 3, 1, 2])
-            _input_tile_reshape = tf.reshape(_input_tile_nchw, [-1, c, h, w])
-            _input_tile_nhwc = tf.transpose(_input_tile_reshape, [0, 2, 3, 1])
-        attention_channel_result = tf.multiply(attention_channel_tile, _input_tile_nhwc)  # [nbatch*nact, h, w, c]
-        # begin spatial attention computation
-        max_pool_spatial = tf.reduce_max(attention_channel_result, axis=3, keepdims=True)  # [nbatch*nact, h, w, 1]
-        avg_pool_spatial = tf.reduce_mean(attention_channel_result, axis=3, keepdims=True)  # [nbatch*nact, h, w, 1]
-        attention_spatial_input = tf.concat([max_pool_spatial, avg_pool_spatial], axis=3)  # [nbatch*nact, h, w, 2]
-        if state_attention not in ["action"]:
-            attention_spatial = tf.sigmoid(conv(attention_spatial_input, "spatial_attention_conv", nf=1, rf=7, stride=1, pad='SAME', init_scale=np.sqrt(2)))  # [nbatch, h, w, 1]
-        elif state_attention == "action":
-            batch_unit_4d = self.get_4d_unit_tensor(h, w, nact, nbatch)  # [nbatch*nact, h, w, nact]
-            attention_spatial_input = tf.concat([attention_spatial_input, batch_unit_4d], axis=3)  # [nbatch*nact, h, w, nact+2]
-            attention_spatial = tf.sigmoid(conv(attention_spatial_input, "spatial_attention_conv", nf=1, rf=7, stride=1, pad='SAME', init_scale=np.sqrt(2)))  # [nbatch*nact, h, w, 1]
-            assert attention_spatial.get_shape().as_list() == [nbatch * nact, h, w, 1]
-        else:
-            raise NotImplementedError("Unkonwn attention {}".format(state_attention))
-        self.attention = tf.squeeze(attention_spatial)  # [nbatch*nact, h, w]
-        attention_spatial_tile = tf.tile(attention_spatial, multiples=[1, 1, 1, c])  # [nbatch*nact, h, w, c]
-        if state_attention == "random":
-            attention_spatial_tile = tf.random_uniform(shape=[nbatch] + attention_spatial_tile.get_shape().as_list()[1:])
-        attention_spatial_result = tf.multiply(attention_spatial_tile, attention_channel_result)
-        assert attention_spatial_result.get_shape().as_list()[1:] == [h, w, c]
-        assert _input_tile_nhwc.get_shape().as_list()[1:] == [h, w, c]
-        attention_result = tf.add(_input_tile_nhwc, attention_spatial_result)  # [None * num_actions, h, w, c]
-        return attention_result
 
 
 class MlpAttentionPolicy(object):

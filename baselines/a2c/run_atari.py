@@ -13,7 +13,7 @@ from baselines import logger
 from baselines.common.cmd_util import make_atari_env, atari_arg_parser
 from baselines.common.vec_env.vec_frame_stack import VecFrameStack
 from baselines.a2c.a2c import learn
-from baselines.a2c.policies import CnnPolicy, LstmPolicy, LnLstmPolicy, CnnAttentionPolicy
+from baselines.a2c.policies import CnnPolicy, LstmPolicy, LnLstmPolicy
 import tensorflow as tf
 
 
@@ -24,8 +24,6 @@ def train(env_id, num_timesteps, seed, policy, lrschedule, num_env, param):
         policy_fn = LstmPolicy
     elif policy == 'lnlstm':
         policy_fn = LnLstmPolicy
-    elif policy== "CnnAttention":
-        policy_fn = CnnAttentionPolicy
     ncpu = multiprocessing.cpu_count()
     if sys.platform == 'darwin': ncpu //= 2
     config = tf.ConfigProto(allow_soft_placement=True,
@@ -40,7 +38,7 @@ def train(env_id, num_timesteps, seed, policy, lrschedule, num_env, param):
 
 def main():
     parser = atari_arg_parser()
-    parser.add_argument('--policy', help='Policy architecture', choices=['cnn', 'lstm', 'lnlstm', 'CnnAttention'], default='cnn')
+    parser.add_argument('--policy', help='Policy architecture', choices=['cnn', 'lstm', 'lnlstm'], default='cnn')
     parser.add_argument('--lrschedule', help='Learning rate schedule', choices=['constant', 'linear'], default='constant')
     parser.add_argument('--param', help='parameters of policy', type=str, default='action')
     parser.add_argument('--nenv', help='num of env', type=int, default=16)

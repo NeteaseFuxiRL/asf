@@ -13,7 +13,7 @@ from baselines.common import explained_variance
 
 class Model(object):
     def __init__(self, *, policy, ob_space, ac_space, nbatch_act, nbatch_train,
-                 nsteps, ent_coef, vf_coef, max_grad_norm, param):
+                 nsteps, ent_coef, vf_coef, max_grad_norm, param,attention_coef=0.1):
 
         sess = tf.get_default_session()
 
@@ -42,7 +42,8 @@ class Model(object):
         pg_loss = tf.reduce_mean(tf.maximum(pg_losses, pg_losses2))
         approxkl = .5 * tf.reduce_mean(tf.square(neglogpac - OLDNEGLOGPAC))
         clipfrac = tf.reduce_mean(tf.to_float(tf.greater(tf.abs(ratio - 1.0), CLIPRANGE)))
-        loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef
+        attention_loss = attention_coef * train_model.attention_loss
+        loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef + attention_loss
         with tf.variable_scope('model'):
             params = tf.trainable_variables()
         grads = tf.gradients(loss, params)
@@ -258,7 +259,7 @@ def learn(*, policy, env, nsteps, total_timesteps, ent_coef, lr,
             if writer is not None:
                 log_extra_scalar_summary(writer=writer, log_info=log_info, step=update * nbatch)
         if save_interval and (update % save_interval == 0 or update == 1) and logger.get_dir():
-            checkdir = os.path.join("/home/netease/data/save/baseline/checkpoints/%s_" % save_path)
+            checkdir = os.path.join("~/data/save/baseline/checkpoints/%s_" % save_path)
             # checkdir = osp.join(logger.get_dir(), 'checkpoints')
             os.makedirs(checkdir, exist_ok=True)
             savepath = osp.join(checkdir, '%.8i' % update)
