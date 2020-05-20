@@ -1,3 +1,5 @@
+![image text](materials/image/Fuxi_logo.png)
+
 # PPO2 with  Action-Specific Focuses
 
 - Implementation of PPO with action-specific focuses in MuJoCo and Atari environments.
